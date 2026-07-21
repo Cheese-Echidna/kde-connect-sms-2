@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.kde.sms2</id>
+  <name>SMS2</name>
+  <summary>Send and receive messages through KDE Connect</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <launchable type="desktop-id">org.kde.sms2.desktop</launchable>
+  <description>
+    <p>A focused desktop messaging client for phones paired with KDE Connect.</p>
+  </description>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <releases>
+    <release version="0.1.0" date="2026-07-21"/>
+  </releases>
+</component>

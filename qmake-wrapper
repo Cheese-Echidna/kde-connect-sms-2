@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# qt-build-utils probes qmake with a cleared child environment. Recover the
+# real qmake path from the parent build process for that initial probe.
+if [[ -z "${REAL_QMAKE:-}" ]] && [[ -r "/proc/$PPID/environ" ]]; then
+    while IFS= read -r -d '' entry; do
+        if [[ "$entry" == REAL_QMAKE=* ]]; then
+            REAL_QMAKE="${entry#REAL_QMAKE=}"
+            break
+        fi
+    done < "/proc/$PPID/environ"
+fi
+if [[ -z "${REAL_QMAKE:-}" ]] && [[ -r /tmp/sms2-real-qmake ]]; then
+    IFS= read -r REAL_QMAKE < /tmp/sms2-real-qmake
+fi
+: "${REAL_QMAKE:?REAL_QMAKE is not set}"
+QT_TOOLS_DIR="${QT_TOOLS_DIR:-/tmp/sms2-qt-tools}"
+QT_LIBS_DIR="${QT_LIBS_DIR:-/tmp/sms2-qt-libs}"
+
+if [[ "${1:-}" == "-query" ]]; then
+    case "${2:-}" in
+        QT_HOST_LIBEXECS|QT_HOST_LIBEXECS/get|QT_INSTALL_LIBEXECS|QT_INSTALL_LIBEXECS/get)
+            printf '%s\n' "$QT_TOOLS_DIR"
+            exit 0
+            ;;
+        QT_INSTALL_LIBS|QT_INSTALL_LIBS/get)
+            printf '%s\n' "$QT_LIBS_DIR"
+            exit 0
+            ;;
+    esac
+
+    if [[ "${2:-}" == */get ]]; then
+        exec "$REAL_QMAKE" -query "${2%/get}"
+    fi
+fi
+
+exec "$REAL_QMAKE" "$@"

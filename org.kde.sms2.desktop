@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=SMS2
+Comment=Send and receive messages through KDE Connect
+Exec=sms2
+Icon=kdeconnect
+Type=Application
+Terminal=false
+Categories=Qt;KDE;Network;InstantMessaging;
+StartupWMClass=org.kde.sms2

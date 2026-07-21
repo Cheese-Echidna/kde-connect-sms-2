@@ -1,0 +1,5 @@
+/build/
+/target/
+/.direnv/
+result
+*.flatpak
