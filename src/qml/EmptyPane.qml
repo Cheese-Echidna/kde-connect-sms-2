@@ -12,6 +12,7 @@ Item {
     property string actionIcon: ""
     signal actionTriggered()
 
+    Accessible.ignored: !visible
     implicitWidth: Kirigami.Units.gridUnit * 24
     implicitHeight: content.implicitHeight
 
@@ -21,27 +22,18 @@ Item {
         width: Math.min(parent.width - Kirigami.Units.gridUnit * 3, Kirigami.Units.gridUnit * 24)
         spacing: Kirigami.Units.largeSpacing
 
-        Rectangle {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 64
-            Layout.preferredHeight: 64
-            radius: 18
-            color: Qt.rgba(Kirigami.Theme.highlightColor.r,
-                           Kirigami.Theme.highlightColor.g,
-                           Kirigami.Theme.highlightColor.b, 0.12)
-
-            Kirigami.Icon {
-                anchors.centerIn: parent
-                width: Kirigami.Units.iconSizes.medium
-                height: width
-                source: root.actionIcon.length > 0 ? root.actionIcon : "kdeconnect"
-                color: Kirigami.Theme.highlightColor
-            }
-        }
-
         ColumnLayout {
             Layout.fillWidth: true
             spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.Icon {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: Kirigami.Units.iconSizes.large
+                Layout.preferredHeight: Kirigami.Units.iconSizes.large
+                visible: root.actionText.length === 0 && root.actionIcon.length > 0
+                source: root.actionIcon
+                Accessible.ignored: true
+            }
 
             Controls.Label {
                 Layout.fillWidth: true
@@ -66,6 +58,7 @@ Item {
         Controls.Button {
             Layout.alignment: Qt.AlignHCenter
             visible: root.actionText.length > 0
+            Accessible.ignored: !visible
             text: root.actionText
             icon.name: root.actionIcon
             onClicked: root.actionTriggered()

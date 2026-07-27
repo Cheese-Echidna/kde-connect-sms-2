@@ -15,6 +15,7 @@ enum Command {
     RefreshMessages,
     HardResync,
     DownloadAttachment {
+        thread_id: i64,
         part_id: i64,
         unique_identifier: String,
     },
@@ -33,7 +34,10 @@ enum Command {
 enum Event {
     Devices(Vec<Device>),
     Conversations(Vec<Conversation>),
-    Messages(Vec<UiMessage>),
+    Messages {
+        thread_id: i64,
+        values: Vec<UiMessage>,
+    },
     SelectedDevice(String),
     SelectedThread(i64),
     Busy(bool),
@@ -43,7 +47,10 @@ enum Event {
     PhoneConnected(bool),
     ConnectionChecked(bool),
     AttachmentLoading(bool),
-    AttachmentReady { source: String, name: String },
+    AttachmentReady {
+        source: String,
+        name: String,
+    },
     MarkFailed(i32),
 }
 
@@ -121,7 +128,16 @@ pub mod ffi {
         fn save_image(self: Pin<&mut AppController>, data_url: QString, file_url: QString) -> bool;
 
         #[qinvokable]
+        fn validate_attachments(
+            self: Pin<&mut AppController>,
+            attachments_json: QString,
+        ) -> QString;
+
+        #[qinvokable]
         fn clear_error(self: Pin<&mut AppController>);
+
+        #[qinvokable]
+        fn report_error(self: Pin<&mut AppController>, message: QString);
     }
 
     impl cxx_qt::Threading for AppController {}
@@ -142,6 +158,7 @@ pub struct AppControllerRust {
     attachment_loading: bool,
     attachment_source: QString,
     attachment_name: QString,
+    cached_messages: std::collections::HashMap<i64, Vec<UiMessage>>,
     command_tx: Option<Sender<Command>>,
 }
 
@@ -162,6 +179,7 @@ impl Default for AppControllerRust {
             attachment_loading: false,
             attachment_source: QString::default(),
             attachment_name: QString::default(),
+            cached_messages: std::collections::HashMap::new(),
             command_tx: None,
         }
     }
@@ -176,6 +194,7 @@ impl ffi::AppController {
         let (tx, rx) = mpsc::channel();
         self.as_mut().rust_mut().command_tx = Some(tx.clone());
         let cached = CachedState::load();
+        self.as_mut().rust_mut().cached_messages = cached.messages.clone();
         if let Some(device) = cached.device.clone() {
             self.as_mut().set_selected_device(QString::from(&device.id));
             self.as_mut().set_devices_json(to_json(&vec![device]));
@@ -234,7 +253,6 @@ impl ffi::AppController {
                 let session_started_at = unix_millis();
 
                 while let Ok(command) = rx.recv() {
-                    queue_event(&qt_thread, Event::Error(String::new()));
                     let result = match command {
                         Command::Initialize => {
                             refresh_devices(
@@ -249,16 +267,30 @@ impl ffi::AppController {
                             .await
                         }
                         Command::SelectDevice(id) => {
-                            device_id = id;
+                            device_id = id.clone();
                             thread_id = -1;
+                            contacts = ContactBook::default();
+                            cache.select_device(Some(Device {
+                                id,
+                                name: device_id.clone(),
+                                reachable: false,
+                            }));
+                            save_cache(&mut cache, &qt_thread);
                             queue_event(&qt_thread, Event::SelectedDevice(device_id.clone()));
                             queue_event(&qt_thread, Event::SelectedThread(-1));
                             queue_event(&qt_thread, Event::Conversations(vec![]));
-                            queue_event(&qt_thread, Event::Messages(vec![]));
-                            load_conversations(
+                            queue_event(
+                                &qt_thread,
+                                Event::Messages {
+                                    thread_id: -1,
+                                    values: vec![],
+                                },
+                            );
+                            refresh_devices(
                                 &client,
                                 &qt_thread,
-                                &device_id,
+                                &mut device_id,
+                                &mut thread_id,
                                 &mut contacts,
                                 &mut cache,
                                 session_started_at,
@@ -281,11 +313,23 @@ impl ffi::AppController {
                             thread_id = id;
                             queue_event(&qt_thread, Event::SelectedThread(id));
                             if id < 0 {
-                                queue_event(&qt_thread, Event::Messages(vec![]));
+                                queue_event(
+                                    &qt_thread,
+                                    Event::Messages {
+                                        thread_id: id,
+                                        values: vec![],
+                                    },
+                                );
                                 Ok(())
                             } else {
                                 if let Some(messages) = cache.messages.get(&id) {
-                                    queue_event(&qt_thread, Event::Messages(messages.clone()));
+                                    queue_event(
+                                        &qt_thread,
+                                        Event::Messages {
+                                            thread_id: id,
+                                            values: messages.clone(),
+                                        },
+                                    );
                                 }
                                 load_messages(
                                     &client, &qt_thread, &device_id, thread_id, &mut cache,
@@ -318,6 +362,7 @@ impl ffi::AppController {
                             }
                         }
                         Command::DownloadAttachment {
+                            thread_id: attachment_thread_id,
                             part_id,
                             unique_identifier,
                         } => {
@@ -334,7 +379,11 @@ impl ffi::AppController {
                                             &qt_thread,
                                             Event::AttachmentReady {
                                                 source: path,
-                                                name: unique_identifier,
+                                                name: attachment_key(
+                                                    attachment_thread_id,
+                                                    part_id,
+                                                    &unique_identifier,
+                                                ),
                                             },
                                         );
                                         queue_event(&qt_thread, Event::AttachmentLoading(false));
@@ -357,6 +406,7 @@ impl ffi::AppController {
                             } else if text.trim().is_empty() && attachments.is_empty() {
                                 Err("Write a message or attach a file before sending".into())
                             } else {
+                                let pending_attachments = pending_attachments(&attachments);
                                 cache
                                     .messages
                                     .entry(thread_id)
@@ -368,11 +418,11 @@ impl ffi::AppController {
                                         timestamp: unix_millis(),
                                         outgoing: true,
                                         sender: String::new(),
-                                        attachments: Vec::new(),
+                                        attachments: pending_attachments,
                                         pending: true,
                                         failed: false,
                                     });
-                                let _ = cache.save();
+                                save_cache(&mut cache, &qt_thread);
                                 queue_event(&qt_thread, Event::Sending(true));
                                 let result = client
                                     .send_reply(&device_id, thread_id, &text, attachments)
@@ -386,6 +436,19 @@ impl ffi::AppController {
                                 } else {
                                     result
                                 };
+                                if result.is_err() {
+                                    if let Some(message) =
+                                        cache.messages.get_mut(&thread_id).and_then(|messages| {
+                                            messages
+                                                .iter_mut()
+                                                .find(|message| message.id == temporary_id)
+                                        })
+                                    {
+                                        message.pending = false;
+                                        message.failed = true;
+                                    }
+                                    save_cache(&mut cache, &qt_thread);
+                                }
                                 finish_send(&qt_thread, result, Some(temporary_id))
                             }
                         }
@@ -447,13 +510,12 @@ impl ffi::AppController {
 
     pub fn open_conversation(mut self: Pin<&mut Self>, thread_id: i64) {
         self.as_mut().set_selected_thread(thread_id);
-        if thread_id < 0 {
-            self.as_mut().set_messages_json(QString::from("[]"));
-        } else {
-            let cached = CachedState::load();
-            let messages = cached.messages.get(&thread_id).cloned().unwrap_or_default();
-            self.as_mut().set_messages_json(to_json(&messages));
-        }
+        let messages = self
+            .cached_messages
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or_default();
+        self.as_mut().set_messages_json(to_json(&messages));
         self.send(Command::OpenConversation(thread_id));
     }
 
@@ -468,6 +530,7 @@ impl ffi::AppController {
     pub fn download_attachment(mut self: Pin<&mut Self>, part_id: i64, unique_identifier: QString) {
         self.as_mut().set_attachment_source(QString::default());
         self.send(Command::DownloadAttachment {
+            thread_id: self.selected_thread,
             part_id,
             unique_identifier: unique_identifier.to_string(),
         });
@@ -485,20 +548,16 @@ impl ffi::AppController {
             timestamp: unix_millis(),
             outgoing: true,
             sender: String::new(),
-            attachments: attachments
-                .iter()
-                .enumerate()
-                .map(|(index, path)| crate::model::Attachment {
-                    part_id: -(index as i64) - 1,
-                    mime_type: String::new(),
-                    encoded_thumbnail: String::new(),
-                    unique_identifier: path.clone(),
-                })
-                .collect(),
+            attachments: pending_attachments(&attachments),
             pending: true,
             failed: false,
         });
         self.as_mut().set_messages_json(to_json(&messages));
+        let selected_thread = self.selected_thread;
+        self.as_mut()
+            .rust_mut()
+            .cached_messages
+            .insert(selected_thread, messages);
         self.send(Command::SendReply {
             text: text.to_string(),
             attachments,
@@ -527,8 +586,17 @@ impl ffi::AppController {
         ffi::save_image(&data_url, &file_url)
     }
 
+    pub fn validate_attachments(self: Pin<&mut Self>, attachments_json: QString) -> QString {
+        let attachments = parse_string_list(&attachments_json.to_string());
+        QString::from(validate_attachment_paths(&attachments).unwrap_or_default())
+    }
+
     pub fn clear_error(mut self: Pin<&mut Self>) {
         self.as_mut().set_error_message(QString::default());
+    }
+
+    pub fn report_error(mut self: Pin<&mut Self>, message: QString) {
+        self.as_mut().set_error_message(message);
     }
 
     fn send(&self, command: Command) {
@@ -566,7 +634,13 @@ async fn refresh_devices(
         *thread_id = -1;
         queue_event(qt_thread, Event::SelectedDevice(device_id.clone()));
         queue_event(qt_thread, Event::SelectedThread(-1));
-        queue_event(qt_thread, Event::Messages(vec![]));
+        queue_event(
+            qt_thread,
+            Event::Messages {
+                thread_id: -1,
+                values: vec![],
+            },
+        );
     }
 
     let phone_connected = devices
@@ -575,11 +649,13 @@ async fn refresh_devices(
     queue_event(qt_thread, Event::PhoneConnected(phone_connected));
     queue_event(qt_thread, Event::ConnectionChecked(true));
 
-    cache.device = devices
-        .iter()
-        .find(|device| device.id == *device_id)
-        .cloned();
-    let _ = cache.save();
+    cache.select_device(
+        devices
+            .iter()
+            .find(|device| device.id == *device_id)
+            .cloned(),
+    );
+    save_cache(cache, qt_thread);
     queue_event(qt_thread, Event::Devices(devices));
     if device_id.is_empty() {
         queue_event(qt_thread, Event::Conversations(vec![]));
@@ -630,8 +706,10 @@ async fn load_conversations(
         qt_thread,
         Event::Status("Syncing conversations and contacts".into()),
     );
-    let _ = client.synchronize_contacts(device_id).await;
-    *contacts = ContactBook::load(device_id);
+    if contacts.is_empty() {
+        let _ = client.synchronize_contacts(device_id).await;
+        *contacts = ContactBook::load(device_id);
+    }
     let mut conversations = client.request_conversations(device_id).await?;
     cache.own_number = infer_own_number(&conversations, cache.own_number.as_deref());
     contacts.decorate(&mut conversations, cache.own_number.as_deref());
@@ -656,11 +734,7 @@ async fn load_conversations(
     }
 
     cache.conversations = conversations.clone();
-    let _ = cache.save();
-    cache_all_threads_in_background(
-        device_id.to_owned(),
-        conversations.iter().map(|item| item.thread_id).collect(),
-    );
+    save_cache(cache, qt_thread);
     queue_event(qt_thread, Event::Conversations(conversations));
     queue_event(qt_thread, Event::Status("Up to date".into()));
     Ok(())
@@ -693,49 +767,32 @@ async fn load_messages(
     }
     messages.sort_by_key(|message| message.timestamp);
     cache.messages.insert(thread_id, messages.clone());
-    let _ = cache.save();
-    queue_event(qt_thread, Event::Messages(messages));
+    save_cache(cache, qt_thread);
+    queue_event(
+        qt_thread,
+        Event::Messages {
+            thread_id,
+            values: messages,
+        },
+    );
     queue_event(qt_thread, Event::Status("Up to date".into()));
     Ok(())
-}
-
-fn cache_all_threads_in_background(device_id: String, thread_ids: Vec<i64>) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static RUNNING: AtomicBool = AtomicBool::new(false);
-    if RUNNING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    std::thread::spawn(move || {
-        if let Ok(runtime) = tokio::runtime::Runtime::new() {
-            runtime.block_on(async move {
-                if let Ok(client) = KdeConnectClient::connect().await {
-                    for thread_id in thread_ids {
-                        let current = CachedState::load();
-                        if current
-                            .messages
-                            .get(&thread_id)
-                            .is_some_and(|messages| !messages.is_empty())
-                        {
-                            continue;
-                        }
-                        if let Ok(messages) = client.messages(&device_id, thread_id).await {
-                            let mut latest = CachedState::load();
-                            latest.messages.insert(thread_id, messages);
-                            let _ = latest.save();
-                        }
-                    }
-                }
-            });
-        }
-        RUNNING.store(false, Ordering::Release);
-    });
 }
 
 fn queue_event(thread: &cxx_qt::CxxQtThread<ffi::AppController>, event: Event) {
     let _ = thread.queue(move |mut controller| match event {
         Event::Devices(value) => controller.as_mut().set_devices_json(to_json(&value)),
         Event::Conversations(value) => controller.as_mut().set_conversations_json(to_json(&value)),
-        Event::Messages(value) => controller.as_mut().set_messages_json(to_json(&value)),
+        Event::Messages { thread_id, values } => {
+            controller
+                .as_mut()
+                .rust_mut()
+                .cached_messages
+                .insert(thread_id, values.clone());
+            if controller.selected_thread == thread_id {
+                controller.as_mut().set_messages_json(to_json(&values));
+            }
+        }
         Event::SelectedDevice(value) => controller
             .as_mut()
             .set_selected_device(QString::from(&value)),
@@ -764,9 +821,29 @@ fn queue_event(thread: &cxx_qt::CxxQtThread<ffi::AppController>, event: Event) {
                 message.pending = false;
                 message.failed = true;
             }
+            let selected_thread = controller.selected_thread;
+            controller
+                .as_mut()
+                .rust_mut()
+                .cached_messages
+                .insert(selected_thread, messages.clone());
             controller.as_mut().set_messages_json(to_json(&messages));
         }
     });
+}
+
+fn attachment_key(thread_id: i64, part_id: i64, identifier: &str) -> String {
+    format!("{thread_id}:{part_id}:{identifier}")
+}
+
+fn save_cache(cache: &mut CachedState, qt_thread: &cxx_qt::CxxQtThread<ffi::AppController>) {
+    if let Err(error) = cache.save() {
+        queue_event(qt_thread, Event::Status("cache-unavailable".into()));
+        queue_event(
+            qt_thread,
+            Event::Error(format!("Could not update the local cache: {error}")),
+        );
+    }
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> QString {
@@ -775,6 +852,35 @@ fn to_json<T: serde::Serialize>(value: &T) -> QString {
 
 fn parse_string_list(json: &str) -> Vec<String> {
     serde_json::from_str(json).unwrap_or_default()
+}
+
+fn validate_attachment_paths(paths: &[String]) -> Option<String> {
+    const MAX_TOTAL_BYTES: u64 = 25 * 1024 * 1024;
+    let mut total_bytes = 0_u64;
+    for path in paths {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => return Some(format!("The attachment no longer exists: {path}")),
+        };
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if total_bytes > MAX_TOTAL_BYTES {
+            return Some("Attachments must be 25 MB or smaller in total.".into());
+        }
+    }
+    None
+}
+
+fn pending_attachments(paths: &[String]) -> Vec<crate::model::Attachment> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| crate::model::Attachment {
+            part_id: -(index as i64) - 1,
+            mime_type: String::new(),
+            encoded_thumbnail: String::new(),
+            unique_identifier: path.clone(),
+        })
+        .collect()
 }
 
 fn unix_millis() -> i64 {

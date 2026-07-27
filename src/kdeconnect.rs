@@ -83,7 +83,7 @@ impl KdeConnectClient {
             .iter()
             .map(Conversation::from)
             .collect();
-        conversations.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.timestamp));
         Ok(conversations)
     }
 

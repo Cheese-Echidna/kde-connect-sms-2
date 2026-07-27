@@ -17,6 +17,10 @@ pub struct ContactBook {
 }
 
 impl ContactBook {
+    pub fn is_empty(&self) -> bool {
+        self.by_number.is_empty()
+    }
+
     pub fn load(device_id: &str) -> Self {
         let Some(directory) = contacts_directory(device_id) else {
             return Self::default();

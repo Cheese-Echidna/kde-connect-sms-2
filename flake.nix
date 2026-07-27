@@ -15,6 +15,8 @@
           pkg-config
           rustc
           cargo
+          clippy
+          rustfmt
           clang
         ];
 
@@ -33,6 +35,7 @@
         RUSTFLAGS = "-L native=${pkgs.kdePackages.qtdeclarative}/lib -L native=${pkgs.kdePackages.qtbase}/lib";
         shellHook = ''
           export QMAKE="$PWD/qmake-wrapper"
+          export CARGO_TARGET_DIR="$PWD/target"
           printf '%s\n' "$REAL_QMAKE" > /tmp/sms2-real-qmake
           export QT_TOOLS_DIR="/tmp/sms2-qt-tools"
           export QT_LIBS_DIR="/tmp/sms2-qt-libs"

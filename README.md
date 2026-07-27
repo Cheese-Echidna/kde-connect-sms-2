@@ -33,10 +33,11 @@ nix develop
 cargo run
 ```
 
-Run the Rust tests:
+Run the Rust and QML interaction tests:
 
 ```sh
 nix develop --command cargo test
+nix develop --command env QT_QPA_PLATFORM=offscreen qmltestrunner -input tests -import src/qml
 ```
 
 The first synchronization can take a moment while KDE Connect requests conversation data from the phone. SMS2 requests the 100 most recent messages when a thread is opened and refreshes the open thread periodically.
@@ -63,7 +64,7 @@ Choose a different `CMAKE_INSTALL_PREFIX` when packaging or installing system-wi
 
 ## Privacy
 
-Message content and attachment thumbnails are held in application memory for display. SMS2 does not persist conversations or send telemetry. Sending a message or attachment forwards it to the selected phone through KDE Connect.
+SMS2 keeps a local cache of conversation metadata and recently opened messages so the interface is useful immediately after startup. The cache is stored at `$XDG_CACHE_HOME/sms2/state.json` (normally `~/.cache/sms2/state.json`), is restricted to the current user, and is replaced when a different phone is selected. Delete that file to clear local message history. SMS2 does not send telemetry. Sending a message or attachment forwards it to the selected phone through KDE Connect.
 
 ## License
 

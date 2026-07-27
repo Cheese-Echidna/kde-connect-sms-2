@@ -8,6 +8,7 @@ Item {
 
     property url source: ""
     property string fallbackText: "?"
+    property string fallbackIcon: ""
     property color backgroundColor: Qt.rgba(Kirigami.Theme.textColor.r,
                                               Kirigami.Theme.textColor.g,
                                               Kirigami.Theme.textColor.b, 0.07)
@@ -50,9 +51,18 @@ Item {
         maskSpreadAtMin: 1.0
     }
 
+    Kirigami.Icon {
+        anchors.centerIn: parent
+        width: Math.min(root.width, root.height) * 0.44
+        height: width
+        visible: root.source.toString().length === 0 && root.fallbackIcon.length > 0
+        source: root.fallbackIcon
+        color: root.fallbackColor
+    }
+
     Controls.Label {
         anchors.centerIn: parent
-        visible: root.source.toString().length === 0
+        visible: root.source.toString().length === 0 && root.fallbackIcon.length === 0
         text: root.fallbackText
         color: root.fallbackColor
         font.weight: Font.DemiBold

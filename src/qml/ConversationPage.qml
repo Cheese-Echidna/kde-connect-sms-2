@@ -11,6 +11,7 @@ Rectangle {
     property var conversation: null
     property var messages: []
     property bool newMode: false
+    property bool compactMode: false
     property bool busy: false
     property bool sending: false
     property bool phoneConnected: false
@@ -20,15 +21,22 @@ Rectangle {
     property bool sendStarted: false
     property bool sendPending: false
     property string previewImageSource: ""
-    property string previewImageName: "Image attachment"
+    property string previewImageName: qsTr("Image attachment")
     property string contextImageSource: ""
-    property string contextImageName: "Image attachment"
+    property string contextImageName: qsTr("Image attachment")
+    property string contextImageKey: ""
     property string contextImageMime: "image/png"
     property double contextImagePartId: -1
     property string downloadedImageSource: ""
     property string downloadedImageName: ""
     property bool imageLoading: false
-    property bool hardScrollPending: false
+    property var attachmentValidator: null
+    property string attachmentError: ""
+    property bool followLatest: true
+    property var drafts: ({})
+    property string activeDraftKey: ""
+
+    Accessible.ignored: !visible
 
     signal backRequested()
     signal replyRequested(string text, var attachments)
@@ -40,6 +48,13 @@ Rectangle {
     signal fullImageRequested(var partId, string uniqueIdentifier)
 
     color: Kirigami.Theme.backgroundColor
+    enabled: visible
+
+    onMessagesChanged: {
+        if (followLatest)
+            Qt.callLater(messageList.jumpToBottom)
+    }
+    Component.onCompleted: switchDraft()
 
     function translucent(color, alpha) {
         return Qt.rgba(color.r, color.g, color.b, alpha)
@@ -53,28 +68,32 @@ Rectangle {
         const date = new Date(timestamp)
         const now = new Date()
         if (date.toDateString() === now.toDateString())
-            return "Today"
+            return qsTr("Today")
 
         const yesterday = new Date(now)
         yesterday.setDate(now.getDate() - 1)
         if (date.toDateString() === yesterday.toDateString())
-            return "Yesterday"
-        if (date.getFullYear() === now.getFullYear())
-            return Qt.formatDate(date, "dddd, MMMM d")
-        return Qt.formatDate(date, "MMMM d, yyyy")
+            return qsTr("Yesterday")
+        return date.toLocaleDateString(Qt.locale(), Locale.LongFormat)
+    }
+
+    function attachmentKey(partId, identifier) {
+        const threadId = conversation ? conversation.threadId : -1
+        return String(threadId) + ":" + String(partId) + ":" + identifier
     }
 
     function setContextImage(source, name, mimeType, partId) {
         contextImageSource = source
-        contextImageName = name || "Image attachment"
+        contextImageName = name || qsTr("Image attachment")
         contextImageMime = mimeType || "image/png"
         contextImagePartId = partId === undefined ? -1 : partId
+        contextImageKey = attachmentKey(contextImagePartId, contextImageName)
     }
 
     function openImagePreview(source, name, partId) {
         setContextImage(source, name, contextImageMime, partId)
         previewImageSource = source
-        previewImageName = "Image attachment"
+        previewImageName = name || qsTr("Image attachment")
         imagePreview.open()
         if (contextImagePartId >= 0 && phoneConnected)
             fullImageRequested(contextImagePartId, contextImageName)
@@ -86,46 +105,108 @@ Rectangle {
     }
 
     onDownloadedImageSourceChanged: {
-        if (downloadedImageSource && downloadedImageName === contextImageName) {
+        if (downloadedImageSource && downloadedImageName === contextImageKey) {
             contextImageSource = downloadedImageSource
             previewImageSource = downloadedImageSource
         }
     }
 
-    function hardScrollToBottom() {
+    function currentDraftKey() {
         if (newMode)
-            return
-        hardScrollPending = true
-        bottomSettleTimer.restart()
-        Qt.callLater(messageList.jumpToBottom)
+            return "new"
+        return conversation ? "thread:" + String(conversation.threadId) : ""
     }
 
-    onConversationChanged: hardScrollToBottom()
-    onMessagesChanged: hardScrollToBottom()
-
-    Timer {
-        id: bottomSettleTimer
-        interval: 400
-        onTriggered: {
-            messageList.jumpToBottom()
-            root.hardScrollPending = false
+    function saveActiveDraft() {
+        if (!activeDraftKey)
+            return
+        drafts[activeDraftKey] = {
+            text: messageField.text,
+            attachments: attachments.slice(),
+            recipients: activeDraftKey === "new" ? recipientsField.text : ""
         }
     }
+
+    function restoreDraft(key) {
+        const draft = drafts[key] || { text: "", attachments: [], recipients: "" }
+        messageField.text = draft.text || ""
+        attachments = (draft.attachments || []).slice()
+        recipientsField.text = draft.recipients || ""
+        attachmentError = ""
+    }
+
+    function switchDraft() {
+        const nextKey = currentDraftKey()
+        if (nextKey !== activeDraftKey) {
+            saveActiveDraft()
+            activeDraftKey = nextKey
+            restoreDraft(nextKey)
+        }
+        if (newMode)
+            composeFocusTimer.restart()
+    }
+
+    Timer {
+        id: composeFocusTimer
+        interval: 0
+        onTriggered: recipientsField.forceActiveFocus(Qt.TabFocusReason)
+    }
+
+    function clearActiveDraft() {
+        if (activeDraftKey)
+            delete drafts[activeDraftKey]
+        messageField.clear()
+        attachments = []
+        if (newMode)
+            recipientsField.clear()
+    }
+
+    function recipientValues() {
+        return recipientsField.text.split(/[;,]/).map(value => value.trim()).filter(Boolean)
+    }
+
+    function recipientIsValid(value) {
+        const compact = value.replace(/[ ()-]/g, "")
+        return /^\+?[0-9]{3,20}$/.test(compact)
+    }
+
+    function hasInvalidRecipient() {
+        return recipientValues().some(value => !recipientIsValid(value))
+    }
+
+    function editFailedMessage(message) {
+        messageField.text = message.body
+        attachments = message.attachments
+            .map(attachment => attachment.unique_identifier)
+            .filter(Boolean)
+        followLatest = true
+        messageField.forceActiveFocus()
+    }
+
+    onConversationChanged: {
+        switchDraft()
+        followLatest = true
+        Qt.callLater(messageList.jumpToBottom)
+    }
+    onNewModeChanged: switchDraft()
 
     function submit() {
         const text = messageField.text.trim()
         if (!text && attachments.length === 0)
             return
 
+        attachmentError = attachmentValidator ? attachmentValidator(attachments) : ""
+        if (attachmentError)
+            return
+
         if (newMode) {
-            const addresses = recipientsField.text.split(/[;,]/).map(value => value.trim()).filter(Boolean)
-            if (addresses.length === 0)
+            const addresses = recipientValues()
+            if (addresses.length === 0 || hasInvalidRecipient())
                 return
             newMessageRequested(addresses, text, attachments)
         } else {
             replyRequested(text, attachments)
-            messageField.clear()
-            attachments = []
+            clearActiveDraft()
         }
         sendPending = newMode
     }
@@ -135,8 +216,7 @@ Rectangle {
             sendStarted = true
         if (!sending && sendPending && sendStarted) {
             if (!errorMessage) {
-                messageField.clear()
-                attachments = []
+                clearActiveDraft()
                 if (newMode)
                     newMessageCompleted()
             }
@@ -184,7 +264,7 @@ Rectangle {
                 anchors.centerIn: parent
                 running: root.imageLoading
                 visible: running
-                Accessible.name: "Loading full image"
+                Accessible.name: qsTr("Loading full image")
             }
         }
     }
@@ -193,7 +273,7 @@ Rectangle {
         id: imageMenu
 
         Controls.MenuItem {
-            text: "Open image"
+            text: qsTr("Open image")
             icon.name: "zoom-in"
             onTriggered: root.openImagePreview(
                 root.contextImageSource,
@@ -204,13 +284,13 @@ Rectangle {
         Controls.MenuSeparator {}
 
         Controls.MenuItem {
-            text: "Copy image"
+            text: qsTr("Copy image")
             icon.name: "edit-copy"
             onTriggered: root.copyImageRequested(root.contextImageSource)
         }
 
         Controls.MenuItem {
-            text: "Save image as…"
+            text: qsTr("Save image as…")
             icon.name: "document-save-as"
             onTriggered: saveImageDialog.open()
         }
@@ -218,7 +298,7 @@ Rectangle {
 
     FileDialog {
         id: saveImageDialog
-        title: "Save image as"
+        title: qsTr("Save image as")
         fileMode: FileDialog.SaveFile
         nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)", "All files (*)"]
         onAccepted: root.saveImageRequested(root.contextImageSource, String(selectedFile))
@@ -226,7 +306,7 @@ Rectangle {
 
     FileDialog {
         id: attachmentDialog
-        title: "Attach files"
+        title: qsTr("Attach files")
         fileMode: FileDialog.OpenFiles
         onAccepted: {
             const paths = []
@@ -234,7 +314,10 @@ Rectangle {
                 const url = String(selectedFiles[index])
                 paths.push(decodeURIComponent(url.replace(/^file:\/\//, "")))
             }
-            root.attachments = root.attachments.concat(paths)
+            const next = root.attachments.concat(paths)
+            root.attachmentError = root.attachmentValidator ? root.attachmentValidator(next) : ""
+            if (!root.attachmentError)
+                root.attachments = next
         }
     }
 
@@ -252,13 +335,13 @@ Rectangle {
                 anchors.leftMargin: Kirigami.Units.largeSpacing
                 anchors.rightMargin: Kirigami.Units.largeSpacing
 
-                Controls.ToolButton {
-                    visible: applicationWindow().compactMode
-                    icon.name: "go-previous"
-                    display: Controls.AbstractButton.IconOnly
-                    Controls.ToolTip.text: "Back to conversations"
-                    Controls.ToolTip.visible: hovered
-                    Accessible.name: Controls.ToolTip.text
+                Controls.Button {
+                    visible: root.compactMode || root.newMode
+                    Accessible.ignored: !visible
+                    icon.name: root.newMode ? "dialog-cancel" : "go-previous"
+                    text: root.newMode ? qsTr("Cancel") : qsTr("Back")
+                    flat: true
+                    Accessible.name: root.newMode ? qsTr("Cancel new message") : qsTr("Back to conversations")
                     onClicked: root.backRequested()
                 }
 
@@ -271,7 +354,9 @@ Rectangle {
                         ? root.conversation.avatar
                         : ""
                     fallbackText: root.conversation && root.conversation.title.length > 0
-                        ? root.conversation.title.charAt(0).toUpperCase()
+                        ? (/[+0-9]/.test(root.conversation.title.charAt(0))
+                            ? root.conversation.title.replace(/\D/g, "").slice(-2)
+                            : root.conversation.title.charAt(0).toUpperCase())
                         : "?"
                 }
 
@@ -281,7 +366,7 @@ Rectangle {
 
                     Controls.Label {
                         Layout.fillWidth: true
-                        text: root.newMode ? "New message" : (root.conversation ? root.conversation.title : "Conversation")
+                        text: root.newMode ? qsTr("New message") : (root.conversation ? root.conversation.title : qsTr("Conversation"))
                         elide: Text.ElideRight
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
@@ -290,21 +375,25 @@ Rectangle {
                     RowLayout {
                         Layout.fillWidth: true
                         visible: !root.newMode && root.conversation !== null
+                        Accessible.ignored: !visible
                         spacing: Kirigami.Units.smallSpacing
 
                         Controls.Label {
                             Layout.fillWidth: true
+                            visible: root.conversation
+                                && root.conversation.participants.join(" · ") !== root.conversation.title
+                            Accessible.ignored: !visible
                             text: root.conversation ? root.conversation.participants.join(" · ") : ""
                             color: Kirigami.Theme.textColor
-                            opacity: 0.58
+                            opacity: 0.72
                             elide: Text.ElideRight
                             font.pixelSize: 11
                         }
 
                         Controls.Label {
                             text: !root.connectionChecked
-                                ? "Checking phone"
-                                : (root.phoneConnected ? "Connected" : "Disconnected")
+                                ? qsTr("Checking phone")
+                                : (root.phoneConnected ? qsTr("Connected") : qsTr("Disconnected"))
                             color: root.phoneConnected
                                 ? Kirigami.Theme.highlightColor
                                 : Kirigami.Theme.textColor
@@ -315,14 +404,13 @@ Rectangle {
                     }
                 }
 
-                Controls.ToolButton {
+                Controls.Button {
                     visible: !root.newMode
-                    icon.name: "view-refresh"
+                    Accessible.ignored: !visible || !root.visible
+                    text: qsTr("Refresh")
+                    flat: true
                     enabled: !root.busy
-                    display: Controls.AbstractButton.IconOnly
-                    Controls.ToolTip.text: "Refresh messages"
-                    Controls.ToolTip.visible: hovered
-                    Accessible.name: Controls.ToolTip.text
+                    Accessible.name: qsTr("Refresh messages")
                     onClicked: root.refreshRequested()
                 }
             }
@@ -343,29 +431,44 @@ Rectangle {
             Layout.topMargin: Kirigami.Units.largeSpacing
             Layout.bottomMargin: Kirigami.Units.smallSpacing
             visible: root.newMode
+            Accessible.ignored: !visible
             spacing: Kirigami.Units.smallSpacing
 
             Controls.Label {
-                text: "To"
+                text: qsTr("To")
                 font.weight: Font.DemiBold
-                Accessible.name: "Recipients"
             }
 
             Controls.TextField {
                 id: recipientsField
+                objectName: "recipientsField"
                 Layout.fillWidth: true
-                placeholderText: "Phone number, or separate recipients with commas"
-                inputMethodHints: Qt.ImhDialableCharactersOnly
+                placeholderText: qsTr("Phone number, or separate recipients with commas")
+                inputMethodHints: Qt.ImhNoPredictiveText
                 focus: root.newMode
-                Accessible.description: "Enter one or more phone numbers"
+                Accessible.name: qsTr("Recipients")
+                Accessible.description: qsTr("Enter one or more phone numbers")
+            }
+
+            Controls.Label {
+                readonly property bool hasError: recipientsField.text.trim().length > 0 && root.hasInvalidRecipient()
+                Layout.fillWidth: true
+                opacity: hasError ? 1 : 0
+                Accessible.ignored: !hasError
+                text: qsTr("Enter valid phone numbers separated by commas or semicolons.")
+                color: Kirigami.Theme.negativeTextColor
+                wrapMode: Text.WordWrap
+                font.pixelSize: 11
             }
         }
 
         ListView {
             id: messageList
+            objectName: "messageList"
             Layout.fillWidth: true
             Layout.fillHeight: true
             visible: !root.newMode
+            Accessible.ignored: !visible
             model: root.messages
             clip: true
             spacing: Kirigami.Units.smallSpacing
@@ -384,23 +487,18 @@ Rectangle {
                 positionViewAtEnd()
             }
 
-            onCountChanged: root.hardScrollToBottom()
-            onModelChanged: root.hardScrollToBottom()
-            onContentHeightChanged: {
-                if (root.hardScrollPending)
+            onMovementEnded: root.followLatest = atYEnd
+            onFlickEnded: root.followLatest = atYEnd
+            onVisibleChanged: {
+                if (visible && root.followLatest)
                     Qt.callLater(jumpToBottom)
             }
-            onVisibleChanged: {
-                if (visible)
-                    root.hardScrollToBottom()
-            }
-            Component.onCompleted: root.hardScrollToBottom()
 
             Controls.ScrollBar.vertical: Controls.ScrollBar {
                 id: conversationScrollBar
-                policy: Controls.ScrollBar.AlwaysOn
+                policy: root.compactMode ? Controls.ScrollBar.AsNeeded : Controls.ScrollBar.AlwaysOn
                 active: true
-                Accessible.name: "Conversation scroll bar"
+                Accessible.name: qsTr("Conversation scroll bar")
             }
 
             delegate: Item {
@@ -418,7 +516,7 @@ Rectangle {
                     visible: parent.showsDay
                     text: root.messageDayLabel(modelData.timestamp)
                     color: Kirigami.Theme.textColor
-                    opacity: 0.56
+                    opacity: 0.76
                     font.pixelSize: 11
                     font.weight: Font.Medium
                 }
@@ -470,7 +568,7 @@ Rectangle {
                                     visible: modelData.encoded_thumbnail.length > 0
                                         && modelData.mime_type.startsWith("image/")
                                     activeFocusOnTab: true
-                                    Accessible.name: "Open image " + modelData.unique_identifier
+                                    Accessible.name: qsTr("Open image %1").arg(modelData.unique_identifier)
                                     onClicked: {
                                         root.setContextImage(
                                             thumbnailSource.source,
@@ -498,7 +596,7 @@ Rectangle {
                                             anchors.fill: parent
                                             visible: false
                                             source: root.downloadedImageSource
-                                                    && root.downloadedImageName === modelData.unique_identifier
+                                                    && root.downloadedImageName === root.attachmentKey(modelData.part_id, modelData.unique_identifier)
                                                 ? root.downloadedImageSource
                                                 : (imageAttachment.visible
                                                     ? "data:" + modelData.mime_type + ";base64," + modelData.encoded_thumbnail
@@ -556,7 +654,7 @@ Rectangle {
 
                                                 Controls.Label {
                                                     Layout.fillWidth: true
-                                                    text: "Open image"
+                                                    text: qsTr("Open image")
                                                     font.weight: Font.Medium
                                                 }
                                             }
@@ -577,13 +675,25 @@ Rectangle {
                             }
                         }
 
+                        Controls.Button {
+                            Layout.alignment: Qt.AlignRight
+                            visible: modelData.failed
+                            Accessible.ignored: !visible
+                            text: qsTr("Edit and retry")
+                            icon.name: "view-refresh"
+                            flat: true
+                            onClicked: root.editFailedMessage(modelData)
+                        }
+
                         Controls.Label {
                             Layout.alignment: Qt.AlignRight
                             text: modelData.failed
-                                ? "Not sent"
-                                : (modelData.pending ? "Sending" : Qt.formatDateTime(new Date(modelData.timestamp), "h:mm AP"))
+                                ? qsTr("Not sent")
+                                : (modelData.pending
+                                    ? qsTr("Sending")
+                                    : new Date(modelData.timestamp).toLocaleTimeString(Qt.locale(), Locale.ShortFormat))
                             color: modelData.outgoing ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                            opacity: modelData.failed ? 1.0 : 0.58
+                            opacity: modelData.failed ? 1.0 : 0.82
                             font.pixelSize: 10
                             font.weight: modelData.failed ? Font.DemiBold : Font.Normal
                         }
@@ -594,9 +704,10 @@ Rectangle {
             Kirigami.PlaceholderMessage {
                 anchors.centerIn: parent
                 visible: messageList.count === 0 && !root.busy
+                Accessible.ignored: !visible
                 icon.name: "mail-message"
-                text: "No messages in this thread"
-                explanation: "Write below to start the conversation."
+                text: qsTr("No messages in this thread")
+                explanation: qsTr("Write below to start the conversation.")
             }
         }
 
@@ -604,13 +715,15 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             visible: root.newMode
+            Accessible.ignored: !visible
 
             EmptyPane {
                 anchors.centerIn: parent
                 width: Math.min(parent.width, Kirigami.Units.gridUnit * 28)
-                title: "Start with a number"
-                description: "Add one or more recipients above, then write your message below. KDE Connect will send it through your phone."
+                title: qsTr("Start with a number")
+                description: qsTr("Add one or more recipients above, then write your message below. KDE Connect will send it through your phone.")
                 actionText: ""
+                actionIcon: "mail-message-new"
             }
         }
 
@@ -635,10 +748,20 @@ Rectangle {
                 anchors.margins: Kirigami.Units.largeSpacing
                 spacing: Kirigami.Units.smallSpacing
 
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    opacity: root.attachmentError.length > 0 ? 1 : 0
+                    Accessible.ignored: root.attachmentError.length === 0
+                    type: Kirigami.MessageType.Error
+                    text: root.attachmentError.length > 0 ? root.attachmentError : " "
+                    showCloseButton: false
+                }
+
                 Controls.ScrollView {
                     Layout.fillWidth: true
                     Layout.preferredHeight: root.attachments.length > 0 ? 38 : 0
                     visible: root.attachments.length > 0
+                    Accessible.ignored: !visible
 
                     Row {
                         spacing: Kirigami.Units.smallSpacing
@@ -666,25 +789,27 @@ Rectangle {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
-                    Controls.ToolButton {
-                        icon.name: "mail-attachment"
-                        display: Controls.AbstractButton.IconOnly
-                        enabled: !root.sending
-                        Controls.ToolTip.text: "Attach files"
-                        Controls.ToolTip.visible: hovered
-                        Accessible.name: Controls.ToolTip.text
+                    Controls.Button {
+                        text: qsTr("Attach")
+                        flat: true
+                        enabled: !root.sending && root.phoneConnected
+                        Accessible.name: root.phoneConnected
+                            ? qsTr("Attach files")
+                            : qsTr("Connect your phone to attach files")
                         onClicked: attachmentDialog.open()
                     }
 
                     Controls.TextArea {
                         id: messageField
+                        objectName: "messageField"
                         Layout.fillWidth: true
                         Layout.preferredHeight: Math.min(104, Math.max(42, contentHeight + topPadding + bottomPadding))
                         Layout.maximumHeight: 104
-                        placeholderText: root.newMode ? "Write a new message" : "Write a message"
+                        placeholderText: root.newMode ? qsTr("Write a new message") : qsTr("Write a message")
                         wrapMode: TextEdit.Wrap
                         enabled: !root.sending
-                        Accessible.description: "Press Control and Enter to send"
+                        Accessible.name: qsTr("Message")
+                        Accessible.description: qsTr("Press Control and Enter to send")
                         background: Rectangle {
                             radius: 10
                             color: root.translucent(Kirigami.Theme.textColor, 0.06)
@@ -704,22 +829,38 @@ Rectangle {
 
                     Controls.Button {
                         icon.name: root.sending ? "view-refresh" : "document-send"
-                        text: root.sending ? "Sending" : "Send"
-                        Accessible.description: "Send message, Control and Enter"
-                        enabled: !root.sending
+                        text: root.sending ? qsTr("Sending") : qsTr("Send")
+                        Accessible.description: qsTr("Send message, Control and Enter")
+                        enabled: root.phoneConnected
+                            && !root.sending
                             && !root.sendPending
                             && (messageField.text.trim().length > 0 || root.attachments.length > 0)
-                            && (!root.newMode || recipientsField.text.trim().length > 0)
+                            && (!root.newMode
+                                || (recipientsField.text.trim().length > 0 && !root.hasInvalidRecipient()))
                         onClicked: root.submit()
                     }
+                }
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    visible: root.connectionChecked && !root.phoneConnected
+                    Accessible.ignored: !visible
+                    text: qsTr("Connect your phone to send messages.")
+                    color: Kirigami.Theme.textColor
+                    opacity: 0.72
+                    font.pixelSize: 11
                 }
             }
         }
 
         Controls.ProgressBar {
+            objectName: "activityProgress"
             Layout.fillWidth: true
-            visible: root.busy || root.sending
-            indeterminate: true
+            Layout.preferredHeight: 3
+            opacity: root.busy || root.sending ? 1 : 0
+            Accessible.ignored: !(root.busy || root.sending)
+            Accessible.name: root.sending ? qsTr("Sending message") : qsTr("Refreshing messages")
+            indeterminate: root.busy || root.sending
         }
     }
 }
