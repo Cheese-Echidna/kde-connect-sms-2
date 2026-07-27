@@ -22,6 +22,7 @@ Rectangle {
     property bool sendPending: false
     property string previewImageSource: ""
     property string previewImageName: qsTr("Image attachment")
+    property int previewImageRotation: 0
     property string contextImageSource: ""
     property string contextImageName: qsTr("Image attachment")
     property string contextImageKey: ""
@@ -33,6 +34,8 @@ Rectangle {
     property var attachmentValidator: null
     property string attachmentError: ""
     property bool followLatest: true
+    property bool initialScrollPending: false
+    property int initialScrollAttempts: 0
     property var drafts: ({})
     property string activeDraftKey: ""
 
@@ -52,9 +55,13 @@ Rectangle {
 
     onMessagesChanged: {
         if (followLatest)
-            Qt.callLater(messageList.jumpToBottom)
+            scheduleScrollToLatest()
     }
-    Component.onCompleted: switchDraft()
+    Component.onCompleted: {
+        switchDraft()
+        if (conversation && !newMode)
+            scheduleScrollToLatest()
+    }
 
     function translucent(color, alpha) {
         return Qt.rgba(color.r, color.g, color.b, alpha)
@@ -94,6 +101,7 @@ Rectangle {
         setContextImage(source, name, contextImageMime, partId)
         previewImageSource = source
         previewImageName = name || qsTr("Image attachment")
+        previewImageRotation = 0
         imagePreview.open()
         if (contextImagePartId >= 0 && phoneConnected)
             fullImageRequested(contextImagePartId, contextImageName)
@@ -102,6 +110,31 @@ Rectangle {
     function showImageMenu(source, name, mimeType, partId) {
         setContextImage(source, name, mimeType, partId)
         imageMenu.popup()
+    }
+
+    function rotatePreview(degrees) {
+        previewImageRotation = ((previewImageRotation + degrees) % 360 + 360) % 360
+    }
+
+    function scheduleScrollToLatest() {
+        initialScrollPending = true
+        initialScrollAttempts = 0
+        initialScrollTimer.restart()
+        Qt.callLater(messageList.jumpToBottom)
+    }
+
+    Timer {
+        id: initialScrollTimer
+        interval: 50
+        repeat: true
+        onTriggered: {
+            messageList.jumpToBottom()
+            root.initialScrollAttempts++
+            if (root.initialScrollAttempts >= 8) {
+                root.initialScrollPending = false
+                stop()
+            }
+        }
     }
 
     onDownloadedImageSourceChanged: {
@@ -186,7 +219,8 @@ Rectangle {
     onConversationChanged: {
         switchDraft()
         followLatest = true
-        Qt.callLater(messageList.jumpToBottom)
+        if (conversation && !newMode)
+            scheduleScrollToLatest()
     }
     onNewModeChanged: switchDraft()
 
@@ -241,23 +275,68 @@ Rectangle {
             color: root.translucent(Kirigami.Theme.textColor, 0.04)
             radius: 10
 
-            Image {
+            Item {
                 anchors.fill: parent
-                anchors.margins: Kirigami.Units.smallSpacing
-                source: root.previewImageSource
-                fillMode: Image.PreserveAspectFit
-                asynchronous: true
-                smooth: true
-                mipmap: true
+                anchors.leftMargin: Kirigami.Units.smallSpacing
+                anchors.rightMargin: Kirigami.Units.smallSpacing
+                anchors.topMargin: Kirigami.Units.smallSpacing
+                anchors.bottomMargin: imageRotationBar.height + Kirigami.Units.smallSpacing
+                clip: true
 
-                TapHandler {
-                    acceptedButtons: Qt.RightButton
-                    onTapped: root.showImageMenu(
-                        root.previewImageSource,
-                        root.contextImageName,
-                        root.contextImageMime,
-                        root.contextImagePartId)
+                Image {
+                    readonly property bool quarterTurn: root.previewImageRotation % 180 !== 0
+                    anchors.centerIn: parent
+                    width: quarterTurn ? parent.height : parent.width
+                    height: quarterTurn ? parent.width : parent.height
+                    source: root.previewImageSource
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    smooth: true
+                    mipmap: true
+                    rotation: root.previewImageRotation
+
+                    Behavior on rotation {
+                        NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                    }
+
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: root.showImageMenu(
+                            root.previewImageSource,
+                            root.contextImageName,
+                            root.contextImageMime,
+                            root.contextImagePartId)
+                    }
                 }
+            }
+
+            RowLayout {
+                id: imageRotationBar
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: Kirigami.Units.smallSpacing
+                spacing: Kirigami.Units.smallSpacing
+
+                Item { Layout.fillWidth: true }
+
+                Controls.ToolButton {
+                    text: qsTr("Rotate left")
+                    icon.name: "object-rotate-left"
+                    display: Controls.AbstractButton.TextBesideIcon
+                    Accessible.name: qsTr("Rotate image left")
+                    onClicked: root.rotatePreview(-90)
+                }
+
+                Controls.ToolButton {
+                    text: qsTr("Rotate right")
+                    icon.name: "object-rotate-right"
+                    display: Controls.AbstractButton.TextBesideIcon
+                    Accessible.name: qsTr("Rotate image right")
+                    onClicked: root.rotatePreview(90)
+                }
+
+                Item { Layout.fillWidth: true }
             }
 
             Controls.BusyIndicator {
@@ -335,7 +414,7 @@ Rectangle {
                 anchors.leftMargin: Kirigami.Units.largeSpacing
                 anchors.rightMargin: Kirigami.Units.largeSpacing
 
-                Controls.Button {
+                Controls.ToolButton {
                     visible: root.compactMode || root.newMode
                     Accessible.ignored: !visible
                     icon.name: root.newMode ? "dialog-cancel" : "go-previous"
@@ -365,8 +444,10 @@ Rectangle {
                     spacing: 1
 
                     Controls.Label {
+                        objectName: "conversationTitle"
                         Layout.fillWidth: true
                         text: root.newMode ? qsTr("New message") : (root.conversation ? root.conversation.title : qsTr("Conversation"))
+                        selectByMouse: !root.newMode
                         elide: Text.ElideRight
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
@@ -379,11 +460,13 @@ Rectangle {
                         spacing: Kirigami.Units.smallSpacing
 
                         Controls.Label {
+                            objectName: "conversationParticipants"
                             Layout.fillWidth: true
                             visible: root.conversation
                                 && root.conversation.participants.join(" · ") !== root.conversation.title
                             Accessible.ignored: !visible
                             text: root.conversation ? root.conversation.participants.join(" · ") : ""
+                            selectByMouse: true
                             color: Kirigami.Theme.textColor
                             opacity: 0.72
                             elide: Text.ElideRight
@@ -404,10 +487,11 @@ Rectangle {
                     }
                 }
 
-                Controls.Button {
+                Controls.ToolButton {
                     visible: !root.newMode
                     Accessible.ignored: !visible || !root.visible
                     text: qsTr("Refresh")
+                    icon.name: "view-refresh"
                     flat: true
                     enabled: !root.busy
                     Accessible.name: qsTr("Refresh messages")
@@ -487,11 +571,19 @@ Rectangle {
                 positionViewAtEnd()
             }
 
+            onMovementStarted: {
+                root.initialScrollPending = false
+                initialScrollTimer.stop()
+            }
             onMovementEnded: root.followLatest = atYEnd
             onFlickEnded: root.followLatest = atYEnd
+            onContentHeightChanged: {
+                if (root.initialScrollPending)
+                    Qt.callLater(jumpToBottom)
+            }
             onVisibleChanged: {
                 if (visible && root.followLatest)
-                    Qt.callLater(jumpToBottom)
+                    root.scheduleScrollToLatest()
             }
 
             Controls.ScrollBar.vertical: Controls.ScrollBar {
@@ -542,9 +634,11 @@ Rectangle {
                         opacity: modelData.pending ? 0.7 : 1.0
 
                         Controls.Label {
+                            objectName: "messageBody"
                             Layout.fillWidth: true
                             visible: modelData.body.length > 0
                             text: modelData.body
+                            selectByMouse: true
                             color: modelData.outgoing ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
                             wrapMode: Text.Wrap
                             textFormat: Text.PlainText
@@ -789,9 +883,9 @@ Rectangle {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
-                    Controls.Button {
-                        text: qsTr("Attach")
-                        flat: true
+                    Controls.ToolButton {
+                        icon.name: "mail-attachment"
+                        display: Controls.AbstractButton.IconOnly
                         enabled: !root.sending && root.phoneConnected
                         Accessible.name: root.phoneConnected
                             ? qsTr("Attach files")
@@ -830,6 +924,7 @@ Rectangle {
                     Controls.Button {
                         icon.name: root.sending ? "view-refresh" : "document-send"
                         text: root.sending ? qsTr("Sending") : qsTr("Send")
+                        highlighted: true
                         Accessible.description: qsTr("Send message, Control and Enter")
                         enabled: root.phoneConnected
                             && !root.sending
